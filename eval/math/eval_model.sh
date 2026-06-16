@@ -25,7 +25,7 @@ for DATA_TYPE in "${DATATYPES[@]}"; do
         data.data_source_key=data_source \
         data.reward_model_key=reward_model \
         model.path=${MODEL_PATH} \
-        rollout.temperature=1.0 \
+        rollout.temperature=0.6 \
         rollout.response_length=40960 \
         rollout.top_k=-1 \
         rollout.top_p=0.95 \
