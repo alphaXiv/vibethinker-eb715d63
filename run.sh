@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Minimal reproduction of the VibeThinker-3B AIME25 claim (arXiv 2606.16140).
-# Serves the released 3B model with vLLM and evaluates Pass@1 on AIME25.
-# Hardware: 1x H100 (80GB). The 3B model is ~6GB in bf16.
+# Same-harness scale comparison: swap to the 1.5B model and rerun the
+# identical AIME25 protocol. The repo's official eval_model.sh actually
+# defaults to WeiboAI/VibeThinker-1.5B, so this isolates the model-size
+# effect (paper claims 74.4 Pass@1 for 1.5B vs 91.4 for 3B) under one
+# consistent eval. Hardware: 1x H100 (80GB); 1.5B is ~3GB in bf16.
 set -euo pipefail
 
+export MODEL_PATH="WeiboAI/VibeThinker-1.5B"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export TOKENIZERS_PARALLELISM=false
