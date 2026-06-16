@@ -5,13 +5,15 @@
 set -euo pipefail
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export HF_HUB_ENABLE_HF_TRANSFER=1
 export TOKENIZERS_PARALLELISM=false
 
 echo "==> installing deps"
-pip install -q "vllm==0.10.1" "transformers>=4.54.0" "math_verify[antlr4_13_2]" \
-    pandas pyarrow hf_transfer 2>&1 | tail -5 || \
-  pip install -q "vllm==0.10.1" "transformers>=4.54.0" math_verify pandas pyarrow hf_transfer 2>&1 | tail -5
+# transformers is pinned: vllm==0.10.1 is incompatible with transformers 5.x
+# (Qwen2Tokenizer drops `all_special_tokens_extended`, which vLLM's tokenizer
+# cache reads). 4.55.4 is the known-good pairing.
+pip install -q "vllm==0.10.1" "transformers==4.55.4" "math_verify[antlr4_13_2]" \
+    pandas pyarrow 2>&1 | tail -5 || \
+  pip install -q "vllm==0.10.1" "transformers==4.55.4" math_verify pandas pyarrow 2>&1 | tail -5
 
 echo "==> running AIME25 evaluation"
 python3 vibethinker_eval.py
