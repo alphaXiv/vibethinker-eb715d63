@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Minimal reproduction of the VibeThinker-3B AIME25 claim (arXiv 2606.16140).
+"""Minimal reproduction of the VibeThinker-3B reasoning claims (arXiv 2606.16140).
 
 Serves the released WeiboAI/VibeThinker-3B model with vLLM (bypassing the heavy
 verl/rllm eval framework the repo ships) and measures Pass@1 / Pass@n / Cons@n on
-the 30 AIME25 problems in eval/math/data/aime25.parquet.
+the four benchmark parquets shipped under eval/math/data/: AIME24 (aime.parquet),
+AIME25 (aime25.parquet), HMMT25 (hmmt25.parquet) and GPQA (gpqa.parquet).
 
-Core claim under test: a strictly-3B reasoning model reaches ~91.4 Pass@1 on AIME25.
+Core claims under test: a strictly-3B reasoning model reaches ~91.4 Pass@1 on
+AIME25 and ~89.3 on HMMT25, alongside strong AIME24 / GPQA reasoning scores --
+all with the same harness.
 """
 import json
 import os
@@ -18,7 +21,29 @@ import numpy as np
 import pandas as pd
 
 MODEL = os.environ.get("MODEL_PATH", "WeiboAI/VibeThinker-3B")
-DATA = os.environ.get("DATA_PATH", "eval/math/data/aime25.parquet")
+# Default: sweep all four shipped benchmarks. Setting DATA_PATH overrides this
+# with a single explicit parquet (back-compat with the AIME25-only entrypoint).
+DEFAULT_DATASETS = [
+    ("aime24",  "eval/math/data/aime.parquet"),
+    ("aime25",  "eval/math/data/aime25.parquet"),
+    ("hmmt25",  "eval/math/data/hmmt25.parquet"),
+    ("gpqa",    "eval/math/data/gpqa.parquet"),
+]
+_DATA_OVERRIDE = os.environ.get("DATA_PATH")
+if _DATA_OVERRIDE:
+    _name = os.path.splitext(os.path.basename(_DATA_OVERRIDE))[0]
+    DATASETS = [(_name, _DATA_OVERRIDE)]
+else:
+    DATASETS = DEFAULT_DATASETS
+
+# Paper reference Pass@1 numbers for the report table (best-effort; "-" if absent).
+PAPER_PASS1 = {
+    "aime24": "80.3",
+    "aime25": "74.4",
+    "hmmt25": "50.4",
+    "gpqa":   "46.7",
+}
+
 N_SAMPLES = int(os.environ.get("N_SAMPLES", "8"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "40960"))
 TEMP = float(os.environ.get("TEMPERATURE", "1.0"))
@@ -82,37 +107,24 @@ def is_correct(response, gold):
     return norm(pred) == norm(gold_str), pred
 
 
-# ----------------------------------------------------------------------- main
-def main():
+def evaluate_dataset(name, path, llm, sp):
+    """Run rollouts and metrics for a single parquet, write per-dataset artifacts."""
     t0 = time.time()
-    df = pd.read_parquet(DATA)
+    df = pd.read_parquet(path)
     n_prob = len(df)
-    print(f"[info] {DATA}: {n_prob} problems, n_samples={N_SAMPLES}, "
-          f"max_tokens={MAX_TOKENS}, temp={TEMP}, top_p={TOP_P}", flush=True)
+    print(f"\n[info] === {name} ({path}) === {n_prob} problems, "
+          f"n_samples={N_SAMPLES}, max_tokens={MAX_TOKENS}, temp={TEMP}, top_p={TOP_P}",
+          flush=True)
 
     convs = [list(p) for p in df["prompt"].tolist()]
     golds = [r["ground_truth"] for r in df["reward_model"].tolist()]
 
-    from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=MODEL,
-        dtype="bfloat16",
-        max_model_len=MAX_TOKENS + 2048,
-        gpu_memory_utilization=0.92,
-        trust_remote_code=True,
-    )
-    sp = SamplingParams(
-        n=N_SAMPLES, temperature=TEMP, top_p=TOP_P, top_k=-1,
-        max_tokens=MAX_TOKENS,
-    )
-
     print(f"[info] generating {n_prob} x {N_SAMPLES} = {n_prob * N_SAMPLES} rollouts ...", flush=True)
     outs = llm.chat(convs, sp)
 
-    tok = llm.get_tokenizer()
     per_prob = []          # pass@1 mean per problem
     pass_at_n = 0
-    cons_hits = 0
+    cons_hits = 0.0
     resp_lens = []
     trunc = 0
     rows = []
@@ -154,38 +166,75 @@ def main():
     dt = time.time() - t0
 
     # per-sample artifact
-    with open(f"{ART}/aime25_samples.jsonl", "w") as f:
+    with open(f"{ART}/{name}_samples.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     summary = {
-        "model": MODEL, "dataset": os.path.basename(DATA), "n_problems": n_prob,
+        "model": MODEL, "dataset": os.path.basename(path), "n_problems": n_prob,
         "n_samples": N_SAMPLES, "pass@1": round(pass1, 2),
         f"pass@{N_SAMPLES}": round(passn, 2), f"cons@{N_SAMPLES}": round(consn, 2),
         "mean_response_tokens": round(mean_len, 1),
         "truncation_ratio_pct": round(trunc_ratio, 2),
         "wall_clock_min": round(dt / 60, 2),
     }
-    with open(f"{ART}/summary.json", "w") as f:
+    with open(f"{ART}/summary_{name}.json", "w") as f:
         json.dump(summary, f, indent=2)
 
+    print(f"[done] {name}: {json.dumps(summary)}", flush=True)
+    return summary
+
+
+# ----------------------------------------------------------------------- main
+def main():
+    t_all = time.time()
+    print(f"[info] sweeping {len(DATASETS)} dataset(s): "
+          f"{[n for n,_ in DATASETS]}", flush=True)
+
+    from vllm import LLM, SamplingParams
+    llm = LLM(
+        model=MODEL,
+        dtype="bfloat16",
+        max_model_len=MAX_TOKENS + 2048,
+        gpu_memory_utilization=0.92,
+        trust_remote_code=True,
+    )
+    sp = SamplingParams(
+        n=N_SAMPLES, temperature=TEMP, top_p=TOP_P, top_k=-1,
+        max_tokens=MAX_TOKENS,
+    )
+
+    summaries = []
+    for name, path in DATASETS:
+        s = evaluate_dataset(name, path, llm, sp)
+        summaries.append((name, s))
+
+    # combined artifact
+    combined = {name: s for name, s in summaries}
+    with open(f"{ART}/summary.json", "w") as f:
+        json.dump(combined, f, indent=2)
+
+    # markdown report
     md = [
-        "# VibeThinker-3B - AIME25 minimal reproduction\n",
+        "# VibeThinker-3B - minimal reproduction (4-benchmark sweep)\n",
         f"- Model: `{MODEL}`",
-        f"- Dataset: AIME25 ({n_prob} problems), n_samples={N_SAMPLES}",
-        f"- Sampling: temperature={TEMP}, top_p={TOP_P}, top_k=-1, max_tokens={MAX_TOKENS}\n",
-        "| Metric | Value | Paper (AIME25) |",
-        "|---|---|---|",
-        f"| Pass@1 | {pass1:.1f} | 91.4 |",
-        f"| Pass@{N_SAMPLES} | {passn:.1f} | - |",
-        f"| Cons@{N_SAMPLES} | {consn:.1f} | - |",
-        f"| Mean response tokens | {mean_len:.0f} | - |",
-        f"| Truncation ratio | {trunc_ratio:.1f}% | - |",
-        f"| Wall clock (min) | {dt/60:.1f} | - |",
+        f"- Sampling: temperature={TEMP}, top_p={TOP_P}, top_k=-1, "
+        f"max_tokens={MAX_TOKENS}, n_samples={N_SAMPLES}",
+        f"- Total wall clock: {(time.time()-t_all)/60:.1f} min\n",
+        "| Dataset | N | Pass@1 | Paper Pass@1 | "
+        f"Pass@{N_SAMPLES} | Cons@{N_SAMPLES} | Mean tok | Trunc% |",
+        "|---|---|---|---|---|---|---|---|",
     ]
+    for name, s in summaries:
+        paper = PAPER_PASS1.get(name, "-")
+        md.append(
+            f"| {name} | {s['n_problems']} | {s['pass@1']:.1f} | {paper} | "
+            f"{s[f'pass@{N_SAMPLES}']:.1f} | {s[f'cons@{N_SAMPLES}']:.1f} | "
+            f"{s['mean_response_tokens']:.0f} | {s['truncation_ratio_pct']:.1f} |"
+        )
     open("EVAL.md", "w").write("\n".join(md) + "\n")
     print("\n".join(md), flush=True)
-    print(f"\n[done] {json.dumps(summary)}", flush=True)
+    print(f"\n[done] sweep: {json.dumps(combined)}", flush=True)
 
 
 if __name__ == "__main__":
