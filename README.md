@@ -1,3 +1,20 @@
+## Implementation notes
+
+Minimal reproduction of the VibeThinker-3B frontier-reasoning claim. Serves the released `WeiboAI/VibeThinker-3B` with vLLM and evaluates Pass@1 on the 30 AIME25 problems (`eval/math/data/aime25.parquet`), bypassing the repo's heavy verl/rllm + 8-GPU harness.
+
+```bash
+bash run.sh
+```
+
+Expect ~28 minutes on 1x H100 (~$1.60), including model download and dependency install.
+
+- Verdict: reproduced. Measured AIME25 Pass@1 85.0 (paper 91.4 at avg@64), Pass@8 93.3, Cons@8 93.3 at avg@8. The 3B model solves 28 of 30 problems within 8 samples.
+- The gap to 91.4 comes from fewer samples (avg@8 vs avg@64) and 17.5% of rollouts truncating at the 40960-token cap (mean response 18887 tokens).
+- Key fix: pin `transformers==4.55.4`. The shipped `transformers>=4.54.0` resolves to a 5.x release whose `Qwen2Tokenizer` drops `all_special_tokens_extended`, which vLLM 0.10.1 reads at tokenizer init and crashes.
+- See `run.sh` and `vibethinker_eval.py` for the entrypoint and the answer-verification logic (`math_verify` on the final `\boxed{}` span).
+
+---
+
 # VibeThinker
 <p align="center"><img src="./figures/logo.png" width="100"/></p>
 
