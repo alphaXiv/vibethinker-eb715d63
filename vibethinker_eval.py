@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Minimal reproduction of the VibeThinker-3B AIME25 claim (arXiv 2606.16140).
+"""Minimal reproduction of the VibeThinker-3B reasoning claim (arXiv 2606.16140).
 
 Serves the released WeiboAI/VibeThinker-3B model with vLLM (bypassing the heavy
 verl/rllm eval framework the repo ships) and measures Pass@1 / Pass@n / Cons@n on
-the 30 AIME25 problems in eval/math/data/aime25.parquet.
-
-Core claim under test: a strictly-3B reasoning model reaches ~91.4 Pass@1 on AIME25.
+HMMT25 (eval/math/data/hmmt25.parquet) and AIME 2024 (eval/math/data/aime.parquet)
+to verify the 3B model's reasoning quality is not AIME25-specific.
 """
 import json
 import os
@@ -18,7 +17,9 @@ import numpy as np
 import pandas as pd
 
 MODEL = os.environ.get("MODEL_PATH", "WeiboAI/VibeThinker-3B")
-DATA = os.environ.get("DATA_PATH", "eval/math/data/aime25.parquet")
+# Datasets to evaluate: HMMT25 + AIME 2024 (generalization beyond AIME25).
+_DEFAULT_DATA = "eval/math/data/hmmt25.parquet,eval/math/data/aime.parquet"
+DATA = [p for p in os.environ.get("DATA_PATH", _DEFAULT_DATA).split(",") if p]
 N_SAMPLES = int(os.environ.get("N_SAMPLES", "8"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "40960"))
 TEMP = float(os.environ.get("TEMPERATURE", "1.0"))
@@ -83,33 +84,30 @@ def is_correct(response, gold):
 
 
 # ----------------------------------------------------------------------- main
-def main():
+# Paper Pass@1 numbers for the datasets we evaluate, for reference in EVAL.md.
+_PAPER_PASS1 = {
+    "hmmt25.parquet": "80.4",
+    "aime.parquet": "80.3",   # AIME 2024
+    "aime25.parquet": "91.4",
+}
+
+
+def eval_one(llm, sp, data_path):
+    """Run the eval on a single parquet and return (summary, md_lines)."""
     t0 = time.time()
-    df = pd.read_parquet(DATA)
+    df = pd.read_parquet(data_path)
     n_prob = len(df)
-    print(f"[info] {DATA}: {n_prob} problems, n_samples={N_SAMPLES}, "
+    base = os.path.basename(data_path)
+    tag = os.path.splitext(base)[0]
+    print(f"[info] {data_path}: {n_prob} problems, n_samples={N_SAMPLES}, "
           f"max_tokens={MAX_TOKENS}, temp={TEMP}, top_p={TOP_P}", flush=True)
 
     convs = [list(p) for p in df["prompt"].tolist()]
     golds = [r["ground_truth"] for r in df["reward_model"].tolist()]
 
-    from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=MODEL,
-        dtype="bfloat16",
-        max_model_len=MAX_TOKENS + 2048,
-        gpu_memory_utilization=0.92,
-        trust_remote_code=True,
-    )
-    sp = SamplingParams(
-        n=N_SAMPLES, temperature=TEMP, top_p=TOP_P, top_k=-1,
-        max_tokens=MAX_TOKENS,
-    )
-
     print(f"[info] generating {n_prob} x {N_SAMPLES} = {n_prob * N_SAMPLES} rollouts ...", flush=True)
     outs = llm.chat(convs, sp)
 
-    tok = llm.get_tokenizer()
     per_prob = []          # pass@1 mean per problem
     pass_at_n = 0
     cons_hits = 0
@@ -154,38 +152,66 @@ def main():
     dt = time.time() - t0
 
     # per-sample artifact
-    with open(f"{ART}/aime25_samples.jsonl", "w") as f:
+    with open(f"{ART}/{tag}_samples.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     summary = {
-        "model": MODEL, "dataset": os.path.basename(DATA), "n_problems": n_prob,
+        "model": MODEL, "dataset": base, "n_problems": n_prob,
         "n_samples": N_SAMPLES, "pass@1": round(pass1, 2),
         f"pass@{N_SAMPLES}": round(passn, 2), f"cons@{N_SAMPLES}": round(consn, 2),
         "mean_response_tokens": round(mean_len, 1),
         "truncation_ratio_pct": round(trunc_ratio, 2),
         "wall_clock_min": round(dt / 60, 2),
     }
-    with open(f"{ART}/summary.json", "w") as f:
-        json.dump(summary, f, indent=2)
-
+    paper = _PAPER_PASS1.get(base, "-")
     md = [
-        "# VibeThinker-3B - AIME25 minimal reproduction\n",
-        f"- Model: `{MODEL}`",
-        f"- Dataset: AIME25 ({n_prob} problems), n_samples={N_SAMPLES}",
+        f"## {tag} ({n_prob} problems)\n",
         f"- Sampling: temperature={TEMP}, top_p={TOP_P}, top_k=-1, max_tokens={MAX_TOKENS}\n",
-        "| Metric | Value | Paper (AIME25) |",
+        f"| Metric | Value | Paper ({tag}) |",
         "|---|---|---|",
-        f"| Pass@1 | {pass1:.1f} | 91.4 |",
+        f"| Pass@1 | {pass1:.1f} | {paper} |",
         f"| Pass@{N_SAMPLES} | {passn:.1f} | - |",
         f"| Cons@{N_SAMPLES} | {consn:.1f} | - |",
         f"| Mean response tokens | {mean_len:.0f} | - |",
         f"| Truncation ratio | {trunc_ratio:.1f}% | - |",
         f"| Wall clock (min) | {dt/60:.1f} | - |",
     ]
-    open("EVAL.md", "w").write("\n".join(md) + "\n")
-    print("\n".join(md), flush=True)
-    print(f"\n[done] {json.dumps(summary)}", flush=True)
+    return summary, md
+
+
+def main():
+    from vllm import LLM, SamplingParams
+    llm = LLM(
+        model=MODEL,
+        dtype="bfloat16",
+        max_model_len=MAX_TOKENS + 2048,
+        gpu_memory_utilization=0.92,
+        trust_remote_code=True,
+    )
+    sp = SamplingParams(
+        n=N_SAMPLES, temperature=TEMP, top_p=TOP_P, top_k=-1,
+        max_tokens=MAX_TOKENS,
+    )
+
+    summaries = []
+    md_all = [
+        "# VibeThinker-3B - HMMT25 + AIME 2024 generalization eval\n",
+        f"- Model: `{MODEL}`",
+        f"- Datasets: {', '.join(os.path.basename(d) for d in DATA)}",
+        f"- n_samples={N_SAMPLES}\n",
+    ]
+    for data_path in DATA:
+        summary, md = eval_one(llm, sp, data_path)
+        summaries.append(summary)
+        md_all.extend(md)
+        md_all.append("")
+
+    with open(f"{ART}/summary.json", "w") as f:
+        json.dump(summaries, f, indent=2)
+    open("EVAL.md", "w").write("\n".join(md_all) + "\n")
+    print("\n".join(md_all), flush=True)
+    print(f"\n[done] {json.dumps(summaries)}", flush=True)
 
 
 if __name__ == "__main__":
