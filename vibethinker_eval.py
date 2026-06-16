@@ -20,7 +20,7 @@ import pandas as pd
 MODEL = os.environ.get("MODEL_PATH", "WeiboAI/VibeThinker-3B")
 DATA = os.environ.get("DATA_PATH", "eval/math/data/aime25.parquet")
 N_SAMPLES = int(os.environ.get("N_SAMPLES", "8"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "40960"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "65536"))
 TEMP = float(os.environ.get("TEMPERATURE", "1.0"))
 TOP_P = float(os.environ.get("TOP_P", "0.95"))
 ART = ".openresearch/artifacts"
