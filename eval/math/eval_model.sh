@@ -2,7 +2,7 @@ set -x
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
-MODEL_PATH="WeiboAI/VibeThinker-1.5B"
+MODEL_PATH="WeiboAI/VibeThinker-3B"
 DATA_PATH="/path/to/eval/data"
 DATATYPES=("aime" "aime25" "hmmt25" "gpqa")
 OUTPUT_DIR="./output"  # Add default output directory
